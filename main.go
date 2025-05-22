@@ -2,20 +2,25 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 )
 
 type Config struct {
@@ -92,16 +97,40 @@ func run() error {
 		Addr:        ":1314",
 	}
 
-	log.Info("listening", slog.String("addr", ":1314"))
-	err = srv.ListenAndServe()
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
-	}
+	lis, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
 		return err
 	}
 
-	return nil
+	eg := errgroup.Group{}
+
+	eg.Go(func() error {
+		log.Info("listening", slog.String("addr", ":1314"))
+		err = srv.Serve(lis)
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+
+	shutdown := make(chan os.Signal, 1)
+	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
+	<-shutdown
+
+	shudownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	log.InfoContext(shudownCtx, "shutting down", slog.String("timeout", (10*time.Second).String()))
+
+	err = srv.Shutdown(shudownCtx)
+	if err != nil {
+		return err
+	}
+
+	return eg.Wait()
 }
 
 func handleAuth(config *Config, log *slog.Logger) http.Handler {
